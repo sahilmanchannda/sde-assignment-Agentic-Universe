@@ -1,13 +1,15 @@
 """Idempotent ingestion: a chunk's effects and the cursor commit in one transaction."""
 from __future__ import annotations
 
-import sys
-import time
+import json
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date
+from typing import TYPE_CHECKING
 
-from controller.api import SimClient
-from controller.store import connect, get_meta, set_meta
+from controller.store import get_meta, set_meta
+
+if TYPE_CHECKING:                      # keeps this module importable (and testable) without httpx
+    from controller.api import SimClient
 
 UPSERT_VARIANT = """
 INSERT INTO agg_variant (workflow_id, day, lang, city_tier, age_band, value_band,
@@ -33,7 +35,7 @@ DO UPDATE SET dials = dials + excluded.dials,
 
 
 class Ingestor:
-    def __init__(self, conn, client: SimClient, d0: date):
+    def __init__(self, conn, client: "SimClient", d0: date):
         self.conn = conn
         self.client = client
         self.d0 = d0
@@ -59,6 +61,8 @@ class Ingestor:
         last_event = int(get_meta(self.conn, "last_event_id", "0"))
         newest, applied = last_event, 0
         leads: list[tuple] = []
+        cfg_rows: list[tuple] = []
+        appr_rows: list[tuple] = []
         agg_v = defaultdict(lambda: [0, 0, 0, 0])   # dials, connected, engaged, halluc
         agg_h = defaultdict(lambda: [0, 0])         # dials, connected
         for ev in self.client.chunk_events(chunk_no):
@@ -90,10 +94,21 @@ class Ingestor:
                 b = agg_h[(wf, int(ev["ts"][11:13]), *f, min(ev["attempt_no"], 3))]
                 b[0] += 1
                 b[1] += connected
+            elif t == "config_changed":
+                cfg_rows.append((ev["workflow_id"], ev["version"], ev["ts"], ev["actor"],
+                                 json.dumps(ev.get("changed_dims", [])),
+                                 ev.get("proposal_id"), ev.get("approval_id"), eid))
+            elif t == "approval_decided":
+                appr_rows.append((ev["approval_id"], ev["workflow_id"], ev["status"],
+                                  json.dumps(ev.get("reasons", [])), ev["ts"], eid))
         with self.conn:                       # ONE transaction: data + cursor together
             self.conn.executemany("INSERT OR IGNORE INTO leads VALUES (?,?,?,?,?,?,?)", leads)
             self.conn.executemany(UPSERT_VARIANT, [k + tuple(v) for k, v in agg_v.items()])
             self.conn.executemany(UPSERT_HOUR, [k + tuple(v) for k, v in agg_h.items()])
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO config_log VALUES (?,?,?,?,?,?,?,?)", cfg_rows)
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO approval_log VALUES (?,?,?,?,?,?)", appr_rows)
             set_meta(self.conn, "last_event_id", newest)
             set_meta(self.conn, f"last_chunk_{kind}", chunk_no)
         return applied
@@ -106,39 +121,3 @@ class Ingestor:
         for ch in sorted(self.client.chunks(kind, after=after), key=lambda c: c["chunk"]):
             total += self.ingest_chunk(kind, ch["chunk"])
         return total
-
-
-def main(url: str, db_path: str) -> None:
-    client = SimClient(url)
-    conn = connect(db_path)
-    st = client.state()
-    if int(get_meta(conn, "last_event_id", "0")) > st["last_event_id"]:
-        sys.exit(f"{db_path} is from a different simulator run. Delete it and retry.")
-    if get_meta(conn, "d0") is None:
-        d0 = (datetime.fromisoformat(st["ts"]) - timedelta(minutes=st["sim_minute"])).date()
-        with conn:
-            set_meta(conn, "d0", d0.isoformat())
-    ing = Ingestor(conn, client, date.fromisoformat(get_meta(conn, "d0")))
-
-    t0 = time.perf_counter()
-    n = ing.ingest_new("history")
-    dt = time.perf_counter() - t0
-    print(f"applied {n} history events in {dt:.1f}s ({n / max(dt, 1e-9):,.0f} events/s)")
-
-    one = lambda q: conn.execute(q).fetchone()[0]
-    print("leads:", one("SELECT COUNT(*) FROM leads"),
-          "| dials (variant table):", one("SELECT SUM(dials) FROM agg_variant"),
-          "| dials (hour table):", one("SELECT SUM(dials) FROM agg_hour"))
-    print("rows: agg_variant =", one("SELECT COUNT(*) FROM agg_variant"),
-          "| agg_hour =", one("SELECT COUNT(*) FROM agg_hour"))
-    rows = conn.execute(
-        "SELECT workflow_id, caller_id, SUM(dials), SUM(connected), SUM(engaged) "
-        "FROM agg_variant GROUP BY workflow_id, caller_id ORDER BY workflow_id, caller_id"
-    ).fetchall()
-    for wf, cid, d, k, e in rows:
-        print(f"{wf} {cid}: dials={d} pickup={k / d:.3f} engage={e / max(k, 1):.3f}")
-
-
-if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8700",
-         sys.argv[2] if len(sys.argv) > 2 else "data/controller.db")

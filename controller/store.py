@@ -36,6 +36,37 @@ CREATE TABLE IF NOT EXISTS agg_hour (
     connected INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (workflow_id, hour, lang, city_tier, age_band, value_band, attempt)
 );
+-- Every config version the simulator tells us about, including supervisor edits.
+CREATE TABLE IF NOT EXISTS config_log (
+    workflow_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    ts TEXT NOT NULL,
+    actor TEXT NOT NULL,               -- supervisor | controller_approved | controller_auto
+    changed_dims TEXT NOT NULL,        -- JSON list
+    proposal_id TEXT,
+    approval_id TEXT,
+    event_id INTEGER NOT NULL,
+    PRIMARY KEY (workflow_id, version)
+);
+-- Approver decisions as reported by the simulator.
+CREATE TABLE IF NOT EXISTS approval_log (
+    approval_id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    status TEXT NOT NULL,              -- approved | rejected | expired
+    reasons TEXT NOT NULL,             -- JSON list
+    ts TEXT NOT NULL,
+    event_id INTEGER NOT NULL
+);
+-- Our own decisions: what we noticed, proposed, applied, rolled back, and why.
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sim_ts TEXT NOT NULL,
+    workflow_id TEXT NOT NULL,
+    kind TEXT NOT NULL,                -- detect | propose | apply | verify | rollback | skip ...
+    summary TEXT NOT NULL,
+    detail TEXT NOT NULL               -- JSON: evidence, numbers, ids (proposal_id, approval_id)
+);
+CREATE INDEX IF NOT EXISTS decisions_wf ON decisions(workflow_id, sim_ts);
 """
 
 
