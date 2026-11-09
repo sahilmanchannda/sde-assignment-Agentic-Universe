@@ -9,17 +9,26 @@ from datetime import date, datetime, timedelta
 from controller.api import SimClient
 from controller.store import connect, get_meta, set_meta
 
-UPSERT = """
-INSERT INTO call_agg (workflow_id, day, hour, lang, city_tier, age_band, value_band,
-                      welcome, voice, caller_id, prompt, attempt_no,
-                      dials, connected, engaged, halluc)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(workflow_id, day, hour, lang, city_tier, age_band, value_band,
-            welcome, voice, caller_id, prompt, attempt_no)
+UPSERT_VARIANT = """
+INSERT INTO agg_variant (workflow_id, day, lang, city_tier, age_band, value_band,
+                         welcome, voice, caller_id, prompt,
+                         dials, connected, engaged, halluc)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(workflow_id, day, lang, city_tier, age_band, value_band,
+            welcome, voice, caller_id, prompt)
 DO UPDATE SET dials = dials + excluded.dials,
               connected = connected + excluded.connected,
               engaged = engaged + excluded.engaged,
               halluc = halluc + excluded.halluc
+"""
+
+UPSERT_HOUR = """
+INSERT INTO agg_hour (workflow_id, hour, lang, city_tier, age_band, value_band,
+                      attempt, dials, connected)
+VALUES (?,?,?,?,?,?,?,?,?)
+ON CONFLICT(workflow_id, hour, lang, city_tier, age_band, value_band, attempt)
+DO UPDATE SET dials = dials + excluded.dials,
+              connected = connected + excluded.connected
 """
 
 
@@ -50,7 +59,8 @@ class Ingestor:
         last_event = int(get_meta(self.conn, "last_event_id", "0"))
         newest, applied = last_event, 0
         leads: list[tuple] = []
-        agg = defaultdict(lambda: [0, 0, 0, 0])
+        agg_v = defaultdict(lambda: [0, 0, 0, 0])   # dials, connected, engaged, halluc
+        agg_h = defaultdict(lambda: [0, 0])         # dials, connected
         for ev in self.client.chunk_events(chunk_no):
             eid = ev["event_id"]
             if eid <= last_event:
@@ -67,19 +77,23 @@ class Ingestor:
                 f = self._features(ev["lead_id"])
                 if f is None:
                     continue                  # call for a lead we never saw: skip, don't crash
+                wf = ev["workflow_id"]
                 v = ev["variant"]
                 qa = ev.get("qa") or {}
-                key = (ev["workflow_id"], self._day(ev["ts"]), int(ev["ts"][11:13]), *f,
-                       v["welcome_message"], v["voice"], v["caller_id"], v["prompt_version"],
-                       ev["attempt_no"])
-                a = agg[key]
+                connected = 1 if ev["connected"] else 0
+                a = agg_v[(wf, self._day(ev["ts"]), *f, v["welcome_message"], v["voice"],
+                           v["caller_id"], v["prompt_version"])]
                 a[0] += 1
-                a[1] += 1 if ev["connected"] else 0
+                a[1] += connected
                 a[2] += 1 if ev["engaged"] else 0
                 a[3] += 1 if qa.get("hallucination_flag") else 0
+                b = agg_h[(wf, int(ev["ts"][11:13]), *f, min(ev["attempt_no"], 3))]
+                b[0] += 1
+                b[1] += connected
         with self.conn:                       # ONE transaction: data + cursor together
             self.conn.executemany("INSERT OR IGNORE INTO leads VALUES (?,?,?,?,?,?,?)", leads)
-            self.conn.executemany(UPSERT, [k + tuple(v) for k, v in agg.items()])
+            self.conn.executemany(UPSERT_VARIANT, [k + tuple(v) for k, v in agg_v.items()])
+            self.conn.executemany(UPSERT_HOUR, [k + tuple(v) for k, v in agg_h.items()])
             set_meta(self.conn, "last_event_id", newest)
             set_meta(self.conn, f"last_chunk_{kind}", chunk_no)
         return applied
@@ -111,12 +125,15 @@ def main(url: str, db_path: str) -> None:
     dt = time.perf_counter() - t0
     print(f"applied {n} history events in {dt:.1f}s ({n / max(dt, 1e-9):,.0f} events/s)")
 
-    print("leads:", conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0],
-          "| dials:", conn.execute("SELECT SUM(dials) FROM call_agg").fetchone()[0],
-          "| agg rows:", conn.execute("SELECT COUNT(*) FROM call_agg").fetchone()[0])
+    one = lambda q: conn.execute(q).fetchone()[0]
+    print("leads:", one("SELECT COUNT(*) FROM leads"),
+          "| dials (variant table):", one("SELECT SUM(dials) FROM agg_variant"),
+          "| dials (hour table):", one("SELECT SUM(dials) FROM agg_hour"))
+    print("rows: agg_variant =", one("SELECT COUNT(*) FROM agg_variant"),
+          "| agg_hour =", one("SELECT COUNT(*) FROM agg_hour"))
     rows = conn.execute(
         "SELECT workflow_id, caller_id, SUM(dials), SUM(connected), SUM(engaged) "
-        "FROM call_agg GROUP BY workflow_id, caller_id ORDER BY workflow_id, caller_id"
+        "FROM agg_variant GROUP BY workflow_id, caller_id ORDER BY workflow_id, caller_id"
     ).fetchall()
     for wf, cid, d, k, e in rows:
         print(f"{wf} {cid}: dials={d} pickup={k / d:.3f} engage={e / max(k, 1):.3f}")

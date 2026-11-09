@@ -15,19 +15,26 @@ CREATE TABLE IF NOT EXISTS leads (
     person_id TEXT NOT NULL,
     lang TEXT, city_tier TEXT, age_band TEXT, value_band TEXT
 );
-CREATE TABLE IF NOT EXISTS call_agg (
+CREATE TABLE IF NOT EXISTS agg_variant (
     workflow_id TEXT NOT NULL,
     day INTEGER NOT NULL,              -- simulated day index: 0 = D0, negative = history
-    hour INTEGER NOT NULL,
     lang TEXT NOT NULL, city_tier TEXT NOT NULL, age_band TEXT NOT NULL, value_band TEXT NOT NULL,
     welcome TEXT NOT NULL, voice TEXT NOT NULL, caller_id TEXT NOT NULL, prompt TEXT NOT NULL,
-    attempt_no INTEGER NOT NULL,
     dials INTEGER NOT NULL DEFAULT 0,
     connected INTEGER NOT NULL DEFAULT 0,
     engaged INTEGER NOT NULL DEFAULT 0,
     halluc INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (workflow_id, day, hour, lang, city_tier, age_band, value_band,
-                 welcome, voice, caller_id, prompt, attempt_no)
+    PRIMARY KEY (workflow_id, day, lang, city_tier, age_band, value_band,
+                 welcome, voice, caller_id, prompt)
+);
+CREATE TABLE IF NOT EXISTS agg_hour (
+    workflow_id TEXT NOT NULL,
+    hour INTEGER NOT NULL,
+    lang TEXT NOT NULL, city_tier TEXT NOT NULL, age_band TEXT NOT NULL, value_band TEXT NOT NULL,
+    attempt INTEGER NOT NULL,          -- 1, 2, or 3 meaning "3 or more"
+    dials INTEGER NOT NULL DEFAULT 0,
+    connected INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (workflow_id, hour, lang, city_tier, age_band, value_band, attempt)
 );
 """
 
