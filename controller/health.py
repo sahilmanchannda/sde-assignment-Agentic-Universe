@@ -43,6 +43,8 @@ def check_caller_ids(recent: dict, baseline: dict, mix: dict, *, min_dials=MIN_D
         p_new, n_new, d_new = standardized(rb, mix)
         p_old, n_old, d_old = standardized(base, mix)
         if d_new < min_dials or d_old < min_dials or n_new <= 0 or n_old <= 0:
+            out.append({"caller_id": cid, "flagged": False, "insufficient": True,
+                        "dials": d_new})
             continue
         # one-sided test that the OLD rate is higher: reuse the two-proportion z-test
         # on effective sample sizes

@@ -22,8 +22,9 @@ def test_a_small_drop_is_ignored_even_if_significant():
     assert not rows[0]["flagged"]
 
 
-def test_thin_data_says_nothing():
-    assert check_caller_ids({"D1": band(0.05, 20)}, {"D1": band(0.27, 400)}, MIX) == []
+def test_thin_data_is_reported_as_insufficient_not_healthy():
+    rows = check_caller_ids({"D1": band(0.05, 20)}, {"D1": band(0.27, 400)}, MIX)
+    assert rows[0]["insufficient"] and not rows[0]["flagged"]
 
 
 def test_a_change_in_age_mix_is_not_mistaken_for_degradation():

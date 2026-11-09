@@ -2,14 +2,12 @@
 from __future__ import annotations
 
 import argparse
-import os
 import time
 
 import httpx
 
 from controller.api import SimClient, SimError
 from controller.decide import schedule_step
-from controller.experiments import experiment_step
 from controller.governance import Governance
 from controller.runtime import open_run
 
@@ -49,9 +47,7 @@ def run(url: str, db_path: str, step: int = STEP_MINUTES) -> None:
             print(f"{st['ts']}  events this run={total:,}  credits={st['credits_remaining']}"
                   f"  elapsed={time.perf_counter() - t0:.0f}s", flush=True)
         gov.sync(st["ts"])
-        experiment_step(conn, client, gov, st)   # first, so it gets the one in-flight slot on day 1
-        if not os.environ.get("CONTROLLER_NO_SCHEDULE"):
-            schedule_step(conn, client, gov, st)
+        schedule_step(conn, client, gov, st)
         advance_safely(client, step)
     print(f"finished at {st['ts']}: {total:,} events ingested in {time.perf_counter() - t0:.0f}s")
 
