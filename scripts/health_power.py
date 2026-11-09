@@ -27,11 +27,13 @@ def sample(dials, drop=0.0):
 
 
 def rate(runs, recent_dials, base_dials, drop):
-    hit = 0
+    hit = thin = 0
     for _ in range(runs):
         rows = check_caller_ids({"D1": sample(recent_dials, drop)},
                                 {"D1": sample(base_dials)}, MIX)
         hit += bool(rows and rows[0]["flagged"])
+        thin += bool(rows and rows[0].get("insufficient"))
+    rate.thin = thin / runs
     return hit / runs
 
 
@@ -44,7 +46,11 @@ def main():
     print("\nDETECTION of a degraded ID, baseline 20000 dials, 1000 runs each")
     print("  recent dials:   300    800   2400")
     for drop in (0.05, 0.10, 0.15):
-        row = [f"{rate(1000, n, 20000, drop):5.2f}" for n in (300, 800, 2400)]
+        row = []
+        for n in (300, 800, 2400):
+            row.append(f"{rate(1000, n, 20000, drop):5.2f}")
+            if n == 300:
+                print(f"  drop {int(drop * 100):2d} pts: thin-day share at 300 dials = {rate.thin:.2f}")
         print(f"  drop {int(drop * 100):2d} pts:  " + "  ".join(row))
     print("\nA FALSE ALARM EVERY DAY for 10 days, at the 800-dial rate: "
           "1 - (1 - p)^10 where p is the 800/20000 figure above")
