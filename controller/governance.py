@@ -93,7 +93,7 @@ class Governance:
 
     # ---- entry points ----
     def propose(self, wf, base, config, summary, rationale, ts, gov, *, diff, affected_leads,
-                dry_run, impact_score):
+                dry_run, impact_score, evidence=None):
         """Queue an approval request. Returns (proposal_id | None, reason_if_none)."""
         if self.in_flight(wf):
             return None, "another change is already in flight"
@@ -101,9 +101,12 @@ class Governance:
             return None, "outside the window in which a decision can land in approver hours"
         if self._requests_last_24h(wf, ts) >= gov["max_requests_per_24h"]:
             return None, "request cap for the last 24h reached"
-        pid = self._draft("approval", wf, base, config, summary, rationale, ts, {
+        req_extra = {
             "diff": diff, "affected_leads": affected_leads, "dry_run": dry_run,
-            "impact_score": impact_score, "expires_in_hours": gov["proposal_ttl_hours"]})
+            "impact_score": impact_score, "expires_in_hours": gov["proposal_ttl_hours"]}
+        if evidence:
+            req_extra["evidence"] = evidence
+        pid = self._draft("approval", wf, base, config, summary, rationale, ts, req_extra)
         self._submit(pid, wf, ts)
         return pid, ""
 

@@ -18,6 +18,8 @@ def cost(n: int) -> int:
 
 def p_clears(true_rate: float, n: int, threshold: float) -> float:
     """Chance a run with n conversations measures at least `threshold` (normal approximation)."""
+    if true_rate <= 0.0:
+        return 0.0
     if true_rate >= 1.0:
         return 1.0
     se = math.sqrt(true_rate * (1 - true_rate) / n)

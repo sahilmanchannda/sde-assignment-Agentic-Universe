@@ -94,6 +94,13 @@ class SimClient:
     def put_config(self, wid: str, body: dict):
         return self._send("PUT", f"/workflows/{wid}/config", retry=False, json=body).json()
 
+    def suggest_fixes(self, wid: str, problem: str):
+        return self._send("POST", "/llm/suggest-fixes", retry=False,
+                          json={"workflow_id": wid, "problem": problem}).json()
+
+    def validate(self, wid: str, prompt: str, n: int):
+        return self._send("POST", "/validation/runs", retry=False,
+                          json={"workflow_id": wid, "prompt_version": prompt, "n": n}).json()
 
     # ---- writes (never blindly retried) ----
     def advance(self, minutes: int):

@@ -93,6 +93,14 @@ def test_only_one_change_in_flight_per_workflow(env):
     assert pid is None and "in flight" in why
 
 
+def test_proposal_includes_optional_evidence(env):
+    conn, _, g = env
+    evidence = {"detector": {"flagged": True}}
+    pid, why = g.propose("w", 1, CFG, "s", "r", T, GOV, **EXTRA, evidence=evidence)
+    assert not why
+    assert g._detail(pid)["request"]["evidence"] == evidence
+
+
 def test_crash_after_post_does_not_duplicate_the_request(env):
     conn, sim, g = env
     pid = g._draft("approval", "w", 1, CFG, "s", "r", T, EXTRA)   # drafted, then "crash"
