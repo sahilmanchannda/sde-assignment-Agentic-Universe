@@ -9,6 +9,9 @@ import httpx
 from controller.api import SimClient, SimError
 from controller.runtime import open_run
 
+from controller.decide import schedule_step
+from controller.governance import Governance
+
 STEP_MINUTES = 15
 
 
@@ -30,6 +33,7 @@ def advance_safely(client: SimClient, minutes: int) -> dict:
 
 def run(url: str, db_path: str, step: int = STEP_MINUTES) -> None:
     client, conn, ing = open_run(url, db_path)
+    gov = Governance(conn, client)
     t0 = time.perf_counter()
     total = ing.ingest_new("history")
     last_day = None
@@ -43,7 +47,8 @@ def run(url: str, db_path: str, step: int = STEP_MINUTES) -> None:
             last_day = day
             print(f"{st['ts']}  events this run={total:,}  credits={st['credits_remaining']}"
                   f"  elapsed={time.perf_counter() - t0:.0f}s", flush=True)
-        # TODO: detectors, experiments and governance run here, once per tick
+        gov.sync(st["ts"])
+        schedule_step(conn, client, gov, st)
         advance_safely(client, step)
     print(f"finished at {st['ts']}: {total:,} events ingested in {time.perf_counter() - t0:.0f}s")
 
