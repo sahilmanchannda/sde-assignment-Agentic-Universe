@@ -67,6 +67,19 @@ CREATE TABLE IF NOT EXISTS decisions (
     detail TEXT NOT NULL               -- JSON: evidence, numbers, ids (proposal_id, approval_id)
 );
 CREATE INDEX IF NOT EXISTS decisions_wf ON decisions(workflow_id, sim_ts);
+
+CREATE TABLE IF NOT EXISTS proposals (
+    proposal_id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    kind TEXT NOT NULL,                -- approval | auto
+    base_version INTEGER NOT NULL,
+    state TEXT NOT NULL,               -- drafted|submitted|approved|applied|rejected|expired|lapsed|stale|failed
+    approval_id TEXT,
+    created_ts TEXT NOT NULL,
+    updated_ts TEXT NOT NULL,
+    detail TEXT NOT NULL               -- JSON: request body, apply_by, reasons, errors
+);
+CREATE INDEX IF NOT EXISTS proposals_wf ON proposals(workflow_id, state);
 """
 
 

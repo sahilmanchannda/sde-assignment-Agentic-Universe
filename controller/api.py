@@ -78,6 +78,23 @@ class SimClient:
             if line:
                 yield json.loads(line)
 
+    def approvals(self, wid: str, status: str | None = None):
+        return self._get("/approvals", workflow_id=wid, status=status)
+
+    def approval(self, approval_id: str):
+        return self._get(f"/approvals/{approval_id}")
+
+    def submit_approval(self, body: dict):
+        return self._send("POST", "/approvals", retry=False, json=body).json()
+
+    def apply(self, wid: str, approval_id: str):
+        return self._send("POST", f"/workflows/{wid}/apply", retry=False,
+                          json={"approval_id": approval_id}).json()
+
+    def put_config(self, wid: str, body: dict):
+        return self._send("PUT", f"/workflows/{wid}/config", retry=False, json=body).json()
+
+
     # ---- writes (never blindly retried) ----
     def advance(self, minutes: int):
         return self._send("POST", "/sim/advance", retry=False, json={"minutes": minutes}).json()
