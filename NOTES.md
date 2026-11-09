@@ -1,0 +1,1 @@
+TODO-last: monitor too slow at 10% holdback (run 2: W3 decayed, no rollback fired). Try one-sided test vs zero lift, larger early holdback. Evidence: reports/experiment_v2.md
