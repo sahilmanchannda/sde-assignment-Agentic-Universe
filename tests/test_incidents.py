@@ -6,9 +6,11 @@ import copy
 import json
 from datetime import date
 
+
 from controller.audit import log_decision
 from controller.governance import in_send_window
 from controller.halluc import check_prompts
+from controller.incidents import watch_target
 from controller.store import get_meta, set_meta
 from controller.validation import affordable_n, cost
 
@@ -130,3 +132,27 @@ def _respond(conn, client, gov, wf, cur, current, target, row, detail, pol, ts):
             _log(conn, ts, wf, "failed", "no usable fix candidates", {"body": fixes})
             return
     _log(conn, ts, wf, "failed", "no candidate passed validation", {"tried": tried})
+
+D0 = date(2027, 1, 4)
+SUP = {"version": 4, "actor": "supervisor", "ts": "2027-01-07T11:30:00+05:30"}
+
+
+def test_watch_starts_for_a_fresh_supervisor_prompt_change():
+    assert watch_target(SUP, None, 3, D0) == 3          # change day index 3, same day
+
+
+def test_watch_ignores_our_own_changes_and_handled_ones():
+    assert watch_target({**SUP, "actor": "controller_approved"}, None, 3, D0) is None
+    assert watch_target(SUP, 4, 3, D0) is None
+    assert watch_target(None, None, 3, D0) is None
+
+
+def test_watch_expires_after_the_day_after_the_change():
+    assert watch_target(SUP, None, 4, D0) == 3
+    assert watch_target(SUP, None, 5, D0) is None
+
+
+def test_same_day_p2_partial_counts_are_flagged_but_thin_data_waits():
+    ref = {"P2": (4000, 60)}                            # reference rate 1.5%
+    assert check_prompts({"P2": (622, 42)}, ref)[0]["flagged"]
+    assert check_prompts({"P2": (120, 9)}, ref)[0]["insufficient"]
