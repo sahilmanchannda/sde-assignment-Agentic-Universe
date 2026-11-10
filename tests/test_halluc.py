@@ -24,3 +24,7 @@ def test_thin_data_is_insufficient_not_healthy():
 def test_unknown_reference_is_insufficient():
     rows = check_prompts({"P2": (600, 36)}, {})
     assert rows[0]["insufficient"]
+
+def test_day6_p1_noise_is_not_flagged_but_p2_incident_is():
+    assert not check_prompts({"P1": (781, 21)}, {"P1": (4000, 60)})[0]["flagged"]
+    assert check_prompts({"P2": (608, 26)}, {"P2": (4000, 60)})[0]["flagged"]

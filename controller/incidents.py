@@ -1,5 +1,8 @@
 """Hallucination incident response: detect -> validate revert -> propose with evidence -> verify.
-Fails safe: an unexpected API response is logged, never guessed at."""
+Fails safe: an unexpected API response is logged, never guessed at.
+
+Guards (after the public_02 flip-flop): strict trigger, memory of prompts we found bad,
+a validation margin, and a cooldown after OUR OWN prompt changes."""
 from __future__ import annotations
 
 import copy
@@ -10,7 +13,7 @@ from controller.audit import log_decision
 from controller.governance import in_send_window
 from controller.halluc import check_prompts
 from controller.store import get_meta, set_meta
-from controller.validation import affordable_n, cost
+from controller.validation import acceptable, affordable_n, cost, in_cooldown
 
 
 def prompt_counts(conn, wf, first_day, last_day):
@@ -38,9 +41,31 @@ def _log(conn, ts, wf, kind, note, detail=None):
         log_decision(conn, ts, wf, kind, note, detail or {})
 
 
+def bad_prompts(conn, wf) -> set:
+    raw = get_meta(conn, f"bad_prompts_{wf}")
+    return set(json.loads(raw)) if raw else set()
+
+
+def remember_bad(conn, wf, prompt):
+    with conn:
+        set_meta(conn, f"bad_prompts_{wf}", json.dumps(sorted(bad_prompts(conn, wf) | {prompt})))
+
+
+def days_since_own_prompt_change(conn, wf, today, d0):
+    """Days since the controller last changed prompt_version, or None if it never has.
+    Supervisor edits do not count: a bad supervisor prompt must never get a cooldown."""
+    row = conn.execute(
+        "SELECT ts FROM config_log WHERE workflow_id=? AND actor!='supervisor' "
+        "AND changed_dims LIKE '%prompt_version%' ORDER BY version DESC LIMIT 1", (wf,)).fetchone()
+    if not row:
+        return None
+    return today - (date.fromisoformat(row[0][:10]) - d0).days
+
+
 def incident_step(conn, client, gov, st):
     ts, day = st["ts"], st["ts"][:10]
-    today = (date.fromisoformat(day) - date.fromisoformat(get_meta(conn, "d0"))).days
+    d0 = date.fromisoformat(get_meta(conn, "d0"))
+    today = (date.fromisoformat(day) - d0).days
     for w in client.workflows():
         wf = w["workflow_id"]
         if get_meta(conn, f"inc_day_{wf}") == day or gov.in_flight(wf):
@@ -55,16 +80,22 @@ def incident_step(conn, client, gov, st):
         current = _prompt_of(cur["config"])
         recent = prompt_counts(conn, wf, today - 1, today - 1)
         history = prompt_counts(conn, wf, -14, today - 2)
-        prev = conn.execute(
+        bad = bad_prompts(conn, wf)
+        others = conn.execute(
             "SELECT prompt FROM agg_variant WHERE workflow_id=? AND prompt!=? "
-            "ORDER BY day DESC LIMIT 1", (wf, current)).fetchone()
-        ref = pick_reference({current: recent.get(current, (0, 0))}, history,
-                             prev[0] if prev else None)
+            "GROUP BY prompt ORDER BY MAX(day) DESC", (wf, current)).fetchall()
+        target = next((p[0] for p in others if p[0] not in bad), None)   # never a known-bad prompt
+        ref = pick_reference({current: recent.get(current, (0, 0))}, history, target)
         rows = check_prompts({current: recent.get(current, (0, 0))}, ref)
         if not rows or not rows[0]["flagged"]:
             continue
-        _respond(conn, client, gov, wf, cur, current, prev[0] if prev else None,
-                 rows[0], detail, pol, ts)
+        since = days_since_own_prompt_change(conn, wf, today, d0)
+        if in_cooldown(since, rows[0]["excess"]):
+            _log(conn, ts, wf, "skip",
+                 f"{current} flagged but within cooldown after our own prompt change",
+                 {"finding": rows[0], "days_since_change": since})
+            continue
+        _respond(conn, client, gov, wf, cur, current, target, rows[0], detail, pol, ts)
 
 
 def _validate(conn, client, wf, prompt, n, ts, pol):
@@ -77,19 +108,24 @@ def _validate(conn, client, wf, prompt, n, ts, pol):
     if run_id is None or rate is None:
         _log(conn, ts, wf, "failed", "unexpected validation response", {"body": res})
         return None
-    ok = rate >= pol.get("min_validation_pass_rate", 0.97)
-    _log(conn, ts, wf, "verify", f"validated {prompt}: pass_rate {rate} ({'ok' if ok else 'below threshold'})",
-         {"run_id": run_id, "n": n, "pass_rate": rate, "prompt": prompt})
+    thr = pol.get("min_validation_pass_rate", 0.97)
+    ok = acceptable(rate, thr)                    # must clear the threshold by a margin
+    _log(conn, ts, wf, "verify",
+         f"validated {prompt}: pass_rate {rate} ({'ok' if ok else 'below threshold plus margin'})",
+         {"run_id": run_id, "n": n, "pass_rate": rate, "prompt": prompt, "threshold": thr})
     return {"run_id": run_id, "pass_rate": rate, "ok": ok}
 
 
 def _respond(conn, client, gov, wf, cur, current, target, row, detail, pol, ts):
     _log(conn, ts, wf, "detect", f"hallucination rate on {current} above reference", {"finding": row})
+    remember_bad(conn, wf, current)
     credits = client.state()["credits_remaining"]
     spent = 0.0
     candidates = [target] if target else []
     tried = []
     for stage in (0, 1):
+        bad = bad_prompts(conn, wf)
+        candidates = [c for c in candidates if c and c not in bad and c not in tried]
         for prompt in candidates:
             n = affordable_n(credits - spent, spent)
             if n == 0:
@@ -116,7 +152,7 @@ def _respond(conn, client, gov, wf, cur, current, target, row, detail, pol, ts):
                 return
         if stage == 1:
             break
-        # revert target missing or failed: ask the LLM once
+        # no known-good target, or it failed validation: ask the LLM once
         try:
             fixes = client.suggest_fixes(wf, f"{current} has an elevated hallucination rate")
         except Exception as e:
@@ -126,7 +162,7 @@ def _respond(conn, client, gov, wf, cur, current, target, row, detail, pol, ts):
         raw = fixes.get("fixes") or fixes.get("suggestions") or []
         candidates = [f.get("prompt_version") for f in raw
                       if isinstance(f, dict) and f.get("prompt_version") not in (current, *tried)]
-        if not candidates:
+        if not [c for c in candidates if c and c not in bad_prompts(conn, wf)]:
             _log(conn, ts, wf, "failed", "no usable fix candidates", {"body": fixes})
             return
     _log(conn, ts, wf, "failed", "no candidate passed validation", {"tried": tried})

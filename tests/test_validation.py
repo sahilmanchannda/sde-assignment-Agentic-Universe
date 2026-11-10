@@ -1,6 +1,15 @@
 from controller.validation import affordable_n, cost, p_clears
 from controller.incidents import pick_reference
+from controller.validation import acceptable, in_cooldown
 
+
+def test_margin_rejects_a_borderline_pass():
+    assert not acceptable(0.9733, 0.97) and acceptable(0.99, 0.97)
+
+
+def test_cooldown_ignores_small_excess_but_not_large():
+    assert in_cooldown(1, 0.025) and not in_cooldown(1, 0.04) and not in_cooldown(5, 0.025)
+    assert not in_cooldown(None, 0.025)
 
 def test_cost_is_per_hundred_rounded_up():
     assert cost(50) == 1 and cost(300) == 3 and cost(301) == 4

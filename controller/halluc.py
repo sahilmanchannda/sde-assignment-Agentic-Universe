@@ -9,9 +9,10 @@ from __future__ import annotations
 from controller.stats import two_prop_test
 
 MIN_CONNECTED = 200    # connected calls on the recent day before we trust a reading
-MIN_EXCESS = 0.01      # absolute rate increase worth responding to
-ALPHA = 0.01
-
+# MIN_EXCESS = 0.01      # absolute rate increase worth responding to
+# ALPHA = 0.01
+MIN_EXCESS = 0.02
+ALPHA = 0.0001
 
 def check_prompts(recent: dict, reference: dict, *, min_connected=MIN_CONNECTED,
                   min_excess=MIN_EXCESS, alpha=ALPHA) -> list[dict]:

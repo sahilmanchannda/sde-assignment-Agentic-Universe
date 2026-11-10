@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 
 import httpx
@@ -49,9 +50,10 @@ def run(url: str, db_path: str, step: int = STEP_MINUTES) -> None:
             print(f"{st['ts']}  events this run={total:,}  credits={st['credits_remaining']}"
                   f"  elapsed={time.perf_counter() - t0:.0f}s", flush=True)
         gov.sync(st["ts"])
-        incident_step(conn, client, gov, st)
+        incident_step(conn, client, gov, st)     # first, so an incident gets the in-flight slot
         experiment_step(conn, client, gov, st)
-        schedule_step(conn, client, gov, st)
+        if not os.environ.get("CONTROLLER_NO_SCHEDULE"):
+            schedule_step(conn, client, gov, st)
         advance_safely(client, step)
     print(f"finished at {st['ts']}: {total:,} events ingested in {time.perf_counter() - t0:.0f}s")
 

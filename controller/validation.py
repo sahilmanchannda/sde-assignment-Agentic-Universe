@@ -10,7 +10,17 @@ N_DEFAULT = 300
 N_MIN, N_MAX = 50, 2000
 RESERVE = 60          # credits always kept for later incidents
 PER_INCIDENT = 40     # most one incident may spend
+MARGIN = 0.01   # a prompt must clear the threshold by this much, validation is noisy
 
+
+def acceptable(pass_rate: float, threshold: float, margin: float = MARGIN) -> bool:
+    return pass_rate >= threshold + margin
+
+
+def in_cooldown(days_since_change: int | None, excess: float,
+                cooldown: int = 2, override: float = 0.03) -> bool:
+    """After our own prompt change, ignore small excesses for a couple of days."""
+    return days_since_change is not None and days_since_change < cooldown and excess < override
 
 def cost(n: int) -> int:
     return math.ceil(n / 100)
