@@ -2,6 +2,9 @@
 stats.py, never by judgement. State lives in the database, so a restart resumes exactly.
 
 Lifecycle: none -> proposed -> running -> closing -> monitoring -> (rolling_back ->) done
+
+Supervisor edits: if a client supervisor changes a dimension we are testing, that dimension is
+dropped from the experiment (its comparison is contaminated) and we never write it again.
 """
 from __future__ import annotations
 
@@ -54,7 +57,8 @@ def split_config(cfg: dict, arms: dict) -> dict:
 
 
 def final_config(cfg: dict, arms: dict, winners: dict, holdback: float = 0.0) -> dict:
-    """Winners get 1-holdback, the old option keeps `holdback`. No winner: back to control."""
+    """Winners get 1-holdback, the old option keeps `holdback`. No winner: back to control.
+    Only dimensions in `arms` are written; everything else is left exactly as it is live."""
     new = copy.deepcopy(cfg)
     d = new["allocations"].setdefault("default", {})
     for dim, a in arms.items():
@@ -64,6 +68,16 @@ def final_config(cfg: dict, arms: dict, winners: dict, holdback: float = 0.0) ->
         else:
             d[dim] = {(w or a["control"]): 1.0}
     return new
+
+
+def supervisor_dims(log_rows, owned=DIMS) -> set:
+    """log_rows: [(actor, changed_dims_json)] for config changes after the experiment started.
+    Returns the dimensions we own that a supervisor changed."""
+    out: set = set()
+    for actor, dims_json in log_rows:
+        if actor == "supervisor":
+            out |= set(json.loads(dims_json)) & set(owned)
+    return out
 
 
 def guardrail(objective: dict):
@@ -92,7 +106,7 @@ def find_winners(counts: dict, arms: dict, primary: str, guard, recent: dict | N
             if guard:
                 gname, drop = guard
                 if gname not in METRICS:
-                    guard_ok = False                      # unknown guardrail: fail closed
+                    guard_ok = False    # unknown guardrail: fail closed
                 else:
                     gx, gn = METRICS[gname](arm)
                     gcx, gcn = METRICS[gname](ctl)
@@ -105,7 +119,7 @@ def find_winners(counts: dict, arms: dict, primary: str, guard, recent: dict | N
                 rx, rn = pm(rc.get(cand, (0, 0, 0)))
                 rcx, rcn = pm(rc.get(a["control"], (0, 0, 0)))
                 if rn == 0 or rcn == 0:
-                    recent_ok = False                     # no recent evidence: fail closed
+                    recent_ok = False    # no recent evidence: fail closed
                 else:
                     recent_diff = rx / rn - rcx / rcn
                     recent_ok = recent_diff >= 0
@@ -176,6 +190,31 @@ def _n_leads(conn, wf):
     return conn.execute("SELECT COUNT(*) FROM leads WHERE workflow_id=?", (wf,)).fetchone()[0]
 
 
+def _guard(conn, wf, exp, ts) -> bool:
+    """Drop any dimension a supervisor changed since the experiment began. Returns True if the
+    experiment has nothing left to test (it is closed here, with no proposal)."""
+    row = conn.execute("SELECT ts FROM config_log WHERE workflow_id=? AND proposal_id=?",
+                       (wf, exp.get("start_pid"))).fetchone()
+    since = row[0] if row else exp.get("started_ts")
+    if since is None:
+        return False
+    log = conn.execute("SELECT actor, changed_dims FROM config_log WHERE workflow_id=? AND ts>?",
+                       (wf, since)).fetchall()
+    touched = supervisor_dims(log) & set(exp.get("arms", {}))
+    if not touched:
+        return False
+    for d in touched:
+        exp["arms"].pop(d, None)
+        exp.get("winners", {}).pop(d, None)
+    note = (f"supervisor changed {', '.join(sorted(touched))} during the experiment; "
+            "leaving it exactly as the supervisor set it and dropping it from the comparison")
+    if not exp["arms"]:
+        exp["state"] = "done"
+        note += "; nothing left to test, experiment closed"
+    _commit(conn, wf, exp, ts, "skip", note, {"touched": sorted(touched)})
+    return not exp["arms"]
+
+
 # ---------- the per-tick step ----------
 def experiment_step(conn, client, gov, st):
     ts, day = st["ts"], st["ts"][:10]
@@ -197,11 +236,11 @@ def experiment_step(conn, client, gov, st):
 def _follow(conn, wf, exp, ts, today):
     ps = _pstate(conn, exp["pid"])
     if ps in (None, "drafted", "submitted", "approved"):
-        return                                           # still in flight
+        return   # still in flight
     s = exp["state"]
     if s == "proposed":
         if ps == "applied":
-            exp.update(state="running", start_day=today + 1)
+            exp.update(state="running", start_day=today + 1, started_ts=ts)
             note = f"experiment live; counting complete days from day {today + 1}"
         else:
             exp.update(state="none", attempts=exp["attempts"] + 1)
@@ -215,7 +254,7 @@ def _follow(conn, wf, exp, ts, today):
             exp["state"], note = "done", "reverted to control; experiment closed"
         else:
             exp["state"], note = "running", f"closing request ended as {ps}; back to review"
-    else:                                                # rolling_back
+    else:   # rolling_back
         if ps == "applied":
             exp["winners"] = exp.pop("after_rollback", {})
             exp.update(state="monitoring" if exp["winners"] else "done", mon_day=today + 1)
@@ -258,18 +297,20 @@ def _start(conn, client, gov, wf, exp, ts, day):
                  "estimate": "none: this is a test, the effect is unknown"},
         impact_score=0.0)
     if pid is None:
-        return                                           # cap or window: retry on a later tick
-    exp.update(state="proposed", pid=pid, arms=arms, last_try_day=day)
+        return   # cap or window: retry on a later tick
+    exp.update(state="proposed", pid=pid, start_pid=pid, arms=arms, last_try_day=day)
     _commit(conn, wf, exp, ts, "experiment", f"proposed experiment: {desc}", {"proposal_id": pid})
 
 
 def _review(conn, client, gov, wf, exp, ts, today):
-    days = today - exp["start_day"]                      # complete days of data so far
+    days = today - exp["start_day"]   # complete days of data so far
     if days < 1 or exp.get("last_eval_day") == today or gov.in_flight(wf):
         return
     detail = client.workflow(wf)
     pol = detail["governance"]
     if not in_send_window(pol, ts):
+        return
+    if _guard(conn, wf, exp, ts):
         return
     primary = detail["objective"]["primary"]
     guard = guardrail(detail["objective"])
@@ -293,14 +334,14 @@ def _review(conn, client, gov, wf, exp, ts, today):
         f"After {days} complete days, {what}. Chosen by one-sided two-proportion tests with "
         f"Benjamini-Hochberg (q={Q}), lift >= {MIN_EFFECT}, guardrail respected, and the latest "
         f"complete day not behind control. Winners keep a {HOLDBACK:.0%} holdback on the old "
-        "option so decay can be detected.",
+        "option so decay can be detected. Only dimensions still under test are changed.",
         ts, pol,
         diff={f"allocations.default.{d}": "winner (with holdback) or back to control" for d in exp["arms"]},
         affected_leads=_n_leads(conn, wf),
         dry_run={"evidence": rows, "confirmed": confirmed, "primary": primary},
         impact_score=lift)
     if pid is None:
-        exp["last_eval_day"] = None                      # retry on a later tick
+        exp["last_eval_day"] = None   # retry on a later tick
         _commit(conn, wf, exp, ts, "verify", f"ready to close but could not send: {why}", ev)
         return
     exp.update(state="closing", pid=pid, winners=confirmed)
@@ -316,6 +357,11 @@ def _monitor(conn, client, gov, wf, exp, ts, today):
     pol = detail["governance"]
     if not in_send_window(pol, ts):
         return
+    if _guard(conn, wf, exp, ts) or not exp.get("winners"):
+        if exp.get("state") != "done":
+            exp["state"] = "done"
+            _commit(conn, wf, exp, ts, "verify", "no promoted dimension left to monitor", {})
+        return
     primary = detail["objective"]["primary"]
     counts = {dim: arm_counts(conn, wf, DIMS[dim], exp["mon_day"], today - 1)
               for dim in exp["winners"]}
@@ -327,7 +373,8 @@ def _monitor(conn, client, gov, wf, exp, ts, today):
         return
     remaining = {d: a for d, a in exp["winners"].items() if d not in decayed}
     cur = client.config(wf)
-    back = final_config(cur["config"], exp["arms"], remaining, HOLDBACK)
+    owned = {d: exp["arms"][d] for d in exp["winners"]}      # only what we still own
+    back = final_config(cur["config"], owned, remaining, HOLDBACK)
     what = ", ".join(f"{d}: back to {exp['arms'][d]['control']}" for d in decayed)
     pid, why = gov.propose(
         wf, cur["version"], back, f"rollback: {what}",
@@ -340,7 +387,7 @@ def _monitor(conn, client, gov, wf, exp, ts, today):
         impact_score=0.0)
     if pid is None:
         _commit(conn, wf, exp, ts, "verify", f"decay detected but could not send: {why}", ev)
-        return                                           # retry on a later tick
+        return   # retry on a later tick
     exp.update(state="rolling_back", pid=pid, after_rollback=remaining, last_eval_day=today)
     ev["proposal_id"] = pid
     _commit(conn, wf, exp, ts, "experiment", f"proposed rollback: {what}", ev)

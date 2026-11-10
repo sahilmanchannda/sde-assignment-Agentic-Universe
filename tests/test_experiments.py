@@ -1,5 +1,5 @@
 from controller.experiments import (final_config, find_winners, monitor_check, plan_arms,
-                                    split_config)
+                                    split_config, supervisor_dims)
 
 OPTS = {"voice": ["V1", "V2", "V3", "V4"], "welcome_message": ["W1", "W2", "W3"]}
 ARMS = {"voice": {"control": "V1", "candidates": ["V2"]}}
@@ -94,3 +94,17 @@ def test_final_config_with_holdback_keeps_the_old_option_at_ten_percent():
     arms = {"voice": {"control": "V1", "candidates": ["V2"]}}
     d = final_config(cfg, arms, {"voice": "V2"}, 0.10)["allocations"]["default"]
     assert d["voice"] == {"V2": 0.9, "V1": 0.1}
+
+def test_supervisor_dims_reports_only_owned_dimensions_changed_by_a_supervisor():
+    rows = [("supervisor", '["voice"]'), ("controller_approved", '["welcome_message"]'),
+            ("supervisor", '["prompt_version"]')]
+    assert supervisor_dims(rows) == {"voice"}
+    assert supervisor_dims([("controller_auto", '["voice"]')]) == set()
+
+
+def test_final_config_leaves_dimensions_outside_arms_untouched():
+    cfg = {"allocations": {"default": {"voice": {"V3": 1.0},
+                                       "welcome_message": {"W1": 0.5, "W3": 0.5}}}}
+    arms = {"welcome_message": {"control": "W1", "candidates": ["W3"]}}
+    d = final_config(cfg, arms, {}, 0.10)["allocations"]["default"]
+    assert d["voice"] == {"V3": 1.0} and d["welcome_message"] == {"W1": 1.0}
