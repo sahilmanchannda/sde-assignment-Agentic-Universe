@@ -1,4 +1,4 @@
-from controller.rotation import band_mix, plan_shift
+from controller.rotation import band_mix, confirm_flags, plan_shift
 
 ALLOC = {"default": {"D1": 0.5, "D2": 0.5}}
 
@@ -41,3 +41,11 @@ def test_unused_id_with_history_can_receive_when_no_healthy_id_is_in_use():
 def test_band_mix_sums_to_one():
     m = band_mix({"D1": {"60+": (100, 25)}, "D2": {"60+": (100, 20), "18-30": (200, 50)}})
     assert abs(sum(m.values()) - 1) < 1e-9 and abs(m["18-30"] - 0.5) < 1e-9
+
+def test_flag_needs_a_clearly_better_id_on_the_same_day():
+    assert confirm_flags(["D2"], {"D1": 0.242, "D2": 0.103}) == ["D2"]
+
+
+def test_lone_id_that_slid_after_taking_all_traffic_is_not_confirmed():
+    assert confirm_flags(["D1"], {"D1": 0.185}) == []
+    assert confirm_flags(["D1"], {"D1": 0.20, "D2": 0.21}) == []

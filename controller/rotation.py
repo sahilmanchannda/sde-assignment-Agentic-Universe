@@ -56,6 +56,17 @@ def band_mix(counts: dict) -> dict:
     s = sum(tot.values())
     return {b: d / s for b, d in tot.items()} if s else {}
 
+def confirm_flags(flagged: list, recent_rate: dict, min_gap: float = 0.05) -> list:
+    """Keep a flagged ID only if, on the same day, some OTHER ID with data picked up at least
+    `min_gap` better. An ID flagged only against its own history (for example after it took
+    all the traffic) is not confirmed. With no other ID to compare, nothing is confirmed."""
+    keep = []
+    for cid in flagged:
+        others = [r for i, r in recent_rate.items() if i != cid and i not in flagged]
+        if others and max(others) - recent_rate.get(cid, 0.0) >= min_gap:
+            keep.append(cid)
+    return keep
+
 
 # ---------- database ----------
 def id_band_counts(conn, wf, first_day, last_day):
@@ -92,7 +103,15 @@ def rotation_step(conn, client, gov, st):
         recent = id_band_counts(conn, wf, today - 1, today - 1)
         base = id_band_counts(conn, wf, -14, end_base)
         rows = check_caller_ids(recent, base, band_mix(base))
-        fresh = [r for r in rows if r.get("flagged") and r["caller_id"] not in first_bad]
+        flagged_now = [r["caller_id"] for r in rows
+                       if r.get("flagged") and r["caller_id"] not in first_bad]
+        rate_now = {r["caller_id"]: r["recent"] for r in rows if "recent" in r}
+        confirmed = set(confirm_flags(flagged_now, rate_now))
+        for cid in set(flagged_now) - confirmed:
+            _log(conn, ts, wf, "skip",
+                 f"caller ID {cid} fell vs its own history but no other ID is clearly better "
+                 "on the same day; not marking it bad", {"recent": rate_now.get(cid)})
+        fresh = [r for r in rows if r["caller_id"] in confirmed]
         for r in fresh:
             first_bad[r["caller_id"]] = today - 1
             _log(conn, ts, wf, "detect",
