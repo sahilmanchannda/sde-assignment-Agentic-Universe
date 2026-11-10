@@ -12,6 +12,7 @@ from controller.decide import schedule_step
 from controller.experiments import experiment_step
 from controller.governance import Governance
 from controller.incidents import incident_step
+from controller.rotation import rotation_step
 from controller.runtime import open_run
 
 STEP_MINUTES = 15
@@ -50,7 +51,8 @@ def run(url: str, db_path: str, step: int = STEP_MINUTES) -> None:
             print(f"{st['ts']}  events this run={total:,}  credits={st['credits_remaining']}"
                   f"  elapsed={time.perf_counter() - t0:.0f}s", flush=True)
         gov.sync(st["ts"])
-        incident_step(conn, client, gov, st)     # first, so an incident gets the in-flight slot
+        incident_step(conn, client, gov, st)     # first: a bad prompt gets the in-flight slot
+        rotation_step(conn, client, gov, st)
         experiment_step(conn, client, gov, st)
         if not os.environ.get("CONTROLLER_NO_SCHEDULE"):
             schedule_step(conn, client, gov, st)
