@@ -1,8 +1,11 @@
 """Hallucination incident response: detect -> validate revert -> propose with evidence -> verify.
 Fails safe: an unexpected API response is logged, never guessed at.
 
-Guards (after the public_02 flip-flop): strict trigger, memory of prompts we found bad,
-a validation margin, and a cooldown after OUR OWN prompt changes."""
+Two detection paths:
+  * daily check on the last complete day (catches slow drift);
+  * same-day watch on a prompt a SUPERVISOR just changed (cuts time-to-fix from ~a day to hours).
+Guards: strict trigger, memory of prompts we found bad, a validation margin, and a cooldown
+after OUR OWN prompt changes."""
 from __future__ import annotations
 
 import copy
@@ -14,6 +17,8 @@ from controller.governance import in_send_window
 from controller.halluc import check_prompts
 from controller.store import get_meta, set_meta
 from controller.validation import acceptable, affordable_n, cost, in_cooldown
+
+WATCH_DAYS = 1   # watch a supervisor's prompt every tick on the change day and the day after
 
 
 def prompt_counts(conn, wf, first_day, last_day):
@@ -30,6 +35,19 @@ def pick_reference(recent, history, previous_prompt):
         if ref.get(p, (0, 0))[0] == 0 and previous_prompt in history:
             ref[p] = history[previous_prompt]
     return ref
+
+
+def watch_target(last_prompt_change, handled_version, today, d0):
+    """Pure. Return the simulated day index of a supervisor prompt change that still needs
+    same-day watching, else None.
+    last_prompt_change: {"version", "actor", "ts"} of the latest prompt change, or None."""
+    c = last_prompt_change
+    if not c or c["actor"] != "supervisor":
+        return None                                   # our own change, or none: nothing to watch
+    if handled_version is not None and handled_version >= c["version"]:
+        return None                                   # already responded to this one
+    change_day = (date.fromisoformat(c["ts"][:10]) - d0).days
+    return change_day if today - change_day <= WATCH_DAYS else None
 
 
 def _prompt_of(cfg):
@@ -62,13 +80,58 @@ def days_since_own_prompt_change(conn, wf, today, d0):
     return today - (date.fromisoformat(row[0][:10]) - d0).days
 
 
+def _revert_target(conn, wf, current):
+    """Most recently used other prompt that we have not found to be bad."""
+    bad = bad_prompts(conn, wf)
+    others = conn.execute(
+        "SELECT prompt FROM agg_variant WHERE workflow_id=? AND prompt!=? "
+        "GROUP BY prompt ORDER BY MAX(day) DESC", (wf, current)).fetchall()
+    return next((p[0] for p in others if p[0] not in bad), None)
+
+
+def _watched(conn, client, gov, wf, ts, today, d0) -> bool:
+    """Same-day check on a prompt a supervisor just shipped. True if it started a response."""
+    row = conn.execute(
+        "SELECT version, actor, ts FROM config_log WHERE workflow_id=? "
+        "AND changed_dims LIKE '%prompt_version%' ORDER BY version DESC LIMIT 1", (wf,)).fetchone()
+    last = {"version": row[0], "actor": row[1], "ts": row[2]} if row else None
+    handled = get_meta(conn, f"watch_done_{wf}")
+    change_day = watch_target(last, int(handled) if handled is not None else None, today, d0)
+    if change_day is None:
+        return False
+    detail = client.workflow(wf)
+    pol = detail["governance"]
+    if not in_send_window(pol, ts):
+        return False
+    cur = client.config(wf)
+    current = _prompt_of(cur["config"])
+    recent = prompt_counts(conn, wf, change_day, today).get(current, (0, 0))
+    history = prompt_counts(conn, wf, -14, change_day - 1)
+    target = _revert_target(conn, wf, current)
+    ref = pick_reference({current: recent}, history, target)
+    finding = check_prompts({current: recent}, ref)[0]
+    if not finding["flagged"]:
+        return False                                  # keep watching on later ticks
+    with conn:
+        set_meta(conn, f"watch_done_{wf}", last["version"])
+    _log(conn, ts, wf, "detect",
+         f"same-day check: {current} (shipped by supervisor at {last['ts']}) is above reference",
+         {"finding": finding, "supervisor_version": last["version"]})
+    _respond(conn, client, gov, wf, cur, current, target, finding, detail, pol, ts)
+    return True
+
+
 def incident_step(conn, client, gov, st):
     ts, day = st["ts"], st["ts"][:10]
     d0 = date.fromisoformat(get_meta(conn, "d0"))
     today = (date.fromisoformat(day) - d0).days
     for w in client.workflows():
         wf = w["workflow_id"]
-        if get_meta(conn, f"inc_day_{wf}") == day or gov.in_flight(wf):
+        if gov.in_flight(wf):
+            continue
+        if _watched(conn, client, gov, wf, ts, today, d0):
+            continue
+        if get_meta(conn, f"inc_day_{wf}") == day:
             continue
         detail = client.workflow(wf)
         pol = detail["governance"]
@@ -80,11 +143,7 @@ def incident_step(conn, client, gov, st):
         current = _prompt_of(cur["config"])
         recent = prompt_counts(conn, wf, today - 1, today - 1)
         history = prompt_counts(conn, wf, -14, today - 2)
-        bad = bad_prompts(conn, wf)
-        others = conn.execute(
-            "SELECT prompt FROM agg_variant WHERE workflow_id=? AND prompt!=? "
-            "GROUP BY prompt ORDER BY MAX(day) DESC", (wf, current)).fetchall()
-        target = next((p[0] for p in others if p[0] not in bad), None)   # never a known-bad prompt
+        target = _revert_target(conn, wf, current)        # never a known-bad prompt
         ref = pick_reference({current: recent.get(current, (0, 0))}, history, target)
         rows = check_prompts({current: recent.get(current, (0, 0))}, ref)
         if not rows or not rows[0]["flagged"]:
